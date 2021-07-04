@@ -1,0 +1,161 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package croissant.v1;
+option go_package = "github.com/rfratto/croissant/internal/nodepb";
+
+// Node handles service-level messages with a Croissant cluster.
+//
+// Nodes that want to participate in the cluster must go through the following
+// bootstrap process:
+//
+// 1. Send a Join to any existing node in the cluster. The call will be propagated
+//    through the cluster via the Pastry routing strategy. Each existing node
+//    that receives the Join should send a Hello to the joining node.
+//
+// 2. Once Hello is called by the last existing node (indicated by a null "Next"
+//    field), the joining node can calculate its State.
+//
+// 3. After the state is calculated, the joining node must then send a Hello
+//    to every node in its state tables. Nodes may optionally attach an acknowledgement
+//    ID to the Hello if they wish to be informed that a peer has changed its state.
+//
+// 4. The node is now in the cluser.
+//
+// When a node wishes to leave the cluster, it should send a Goodbye to all nodes in
+// its state tables. Nodes may leave abruptly; peers should perform liveness checks
+// and adjust their state accordingly.
+service Node {
+  // Join initiates a series of handshakes to join the ring as a new node.
+  rpc Join(JoinRequest) returns (google.protobuf.Empty);
+
+  // Hello is used between two nodes to share their state. If the
+  // HelloRequest is an Ack and state has been changed, should respond
+  // with the new state.
+  rpc Hello(HelloRequest) returns (HelloResponse);
+
+  // Goodbye informs a node that a node is leaving the cluster.
+  rpc Goodbye(GoodbyeRequest) returns (google.protobuf.Empty);
+
+  // GetState requests the state tables for this node.
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+}
+
+message JoinRequest {
+  // The joiner is the node that is trying to join.
+  Descriptor joiner = 1;
+}
+
+// Descriptor describes a node within a cluster.
+message Descriptor {
+  // id within the ring. Any token whose value is equal or closer to this id
+  // than any other id from other nodes will be assigned ownership to this
+  // node.
+  ID id = 1;
+
+  // Address of the node, used for both inter-node communication and for
+  // clients to send requests.
+  string addr = 2;
+}
+
+// ID is a 128-bit number that identifies a node.
+message ID {
+  uint64 high = 1;
+  uint64 low  = 2;
+}
+
+message HelloRequest {
+  // The node initiating the Hello.
+  Descriptor initiator = 1;
+
+  // The next node, if any, that will also send a Hello.
+  Descriptor next = 2;
+
+  // State of the initiator.
+  State state = 3;
+
+  // Ack ID identifies the Hello as the acknowledgement of a previous hello. The ID
+  // is set to the state ID of the state of the receiver. If the receiver's
+  // state ID has changed, it should reply with the new state.
+  //
+  // 0 indicates "not an acknowledgement".
+  uint64 ack_id = 4;
+}
+
+message HelloResponse {
+  // If ack_id was > 0 in in the Hello request and the state ID of the
+  // receiver has changed, new_state should be set to the current state
+  // of the receiver.
+  State new_state = 1;
+}
+
+// State is the internal state of a node used for routing messages.
+message State {
+  // Descriptor of the node that this state belongs to.
+  Descriptor node = 1;
+
+  // Nodes that appear immediately before this node in the ring.
+  repeated Descriptor predecessors = 2;
+  // Nodes that appear immediately after this node in the ring.
+  repeated Descriptor successors = 3;
+
+  // The bit length used to represent IDs for routing. Must be one of
+  // 8/16/32/64/128.
+  uint32 id_bit_length = 4;
+
+  // The base used to represent the ID for routing (i.e., hexadecimal,
+  // base-16). Must be one of 2/4/8/16.
+  uint32 id_base = 5;
+
+  // The 2D routing table used to route messages to far away nodes.
+  // Key is the index in the routing table, where the position is
+  // (width*y)+x.
+  map<uint32, Descriptor> routing = 6;
+
+  // List of nodes that are geographically located close to this node.
+  repeated Descriptor neighborhood = 7;
+
+  // ID representing this table. A change to the table must change this ID.
+  // It is common to use modified timestamp for this.
+  uint64 state_id = 8;
+
+  // A set of health of descriptors in the map. This MUST be sorted in order
+  // of peer ID. Descriptors inside MUST be unique.
+  repeated DescriptorHealth health_set = 9;
+}
+
+message DescriptorHealth {
+  // The peer this DescriptorHealth is for.
+  Descriptor peer = 1;
+  // The health of the peer.
+  Health health = 2;
+}
+
+// State that peers can be in.
+enum Health {
+  // The default State. The peer is healthy and may be freely communicated
+  // with.
+  HEALTHY = 0;
+
+  // The peer is suspected to be unhealthy. Communications should be avoided
+  // with this peer.
+  UNHEALTHY = 1;
+
+  // The peer is dead and will be removed from the routing table as soon as
+  // possible.
+  DEAD = 2;
+}
+
+// GetStateRequest requests the state from a node.
+message GetStateRequest { }
+
+message GetStateResponse {
+  // State holds the state of the node.
+  State state = 1;
+}
+
+message GoodbyeRequest {
+  // The node leaving the cluster.
+  Descriptor node = 1;
+}
