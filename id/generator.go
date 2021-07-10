@@ -1,11 +1,10 @@
 package id
 
 import (
+	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"hash/fnv"
-	"math"
 	"sync"
 )
 
@@ -20,30 +19,36 @@ func NewGenerator(size int) Generator {
 	switch size {
 	case 8:
 		var g gen8
-		g.p.New = func() interface{} { return fnv.New32a() }
+		g.max = MaxForSize(size).Low
+		g.p.New = func() interface{} { return md5.New() }
 		return &g
 	case 16:
 		var g gen16
-		g.p.New = func() interface{} { return fnv.New32a() }
+		g.max = MaxForSize(size).Low
+		g.p.New = func() interface{} { return md5.New() }
 		return &g
 	case 32:
 		var g gen32
-		g.p.New = func() interface{} { return fnv.New32a() }
+		g.max = MaxForSize(size).Low
+		g.p.New = func() interface{} { return md5.New() }
 		return &g
 	case 64:
 		var g gen64
-		g.p.New = func() interface{} { return fnv.New64a() }
+		g.p.New = func() interface{} { return md5.New() }
 		return &g
 	case 128:
 		var g gen128
-		g.p.New = func() interface{} { return fnv.New128a() }
+		g.p.New = func() interface{} { return md5.New() }
 		return &g
 	default:
 		panic("invalid size")
 	}
 }
 
-type gen8 struct{ p sync.Pool }
+type gen8 struct {
+	max uint64
+	p   sync.Pool
+}
 
 func (g *gen8) Get(s string) ID {
 	h := g.p.New().(hash.Hash)
@@ -52,11 +57,18 @@ func (g *gen8) Get(s string) ID {
 	h.Reset()
 	fmt.Fprint(h, s)
 
-	sum := binary.BigEndian.Uint32(h.Sum(nil))
-	return ID{Low: uint64(sum & math.MaxUint8)}
+	sum := h.Sum(nil)
+	var (
+		low  = binary.BigEndian.Uint64(sum[8:])
+		high = binary.BigEndian.Uint64(sum[:8])
+	)
+	return ID{Low: (high ^ low) % g.max}
 }
 
-type gen16 struct{ p sync.Pool }
+type gen16 struct {
+	max uint64
+	p   sync.Pool
+}
 
 func (g *gen16) Get(s string) ID {
 	h := g.p.New().(hash.Hash)
@@ -65,11 +77,18 @@ func (g *gen16) Get(s string) ID {
 	h.Reset()
 	fmt.Fprint(h, s)
 
-	sum := binary.BigEndian.Uint32(h.Sum(nil))
-	return ID{Low: uint64(sum & math.MaxUint16)}
+	sum := h.Sum(nil)
+	var (
+		low  = binary.BigEndian.Uint64(sum[8:])
+		high = binary.BigEndian.Uint64(sum[:8])
+	)
+	return ID{Low: (high ^ low) % g.max}
 }
 
-type gen32 struct{ p sync.Pool }
+type gen32 struct {
+	max uint64
+	p   sync.Pool
+}
 
 func (g *gen32) Get(s string) ID {
 	h := g.p.New().(hash.Hash)
@@ -78,8 +97,12 @@ func (g *gen32) Get(s string) ID {
 	h.Reset()
 	fmt.Fprint(h, s)
 
-	sum := binary.BigEndian.Uint32(h.Sum(nil))
-	return ID{Low: uint64(sum)}
+	sum := h.Sum(nil)
+	var (
+		low  = binary.BigEndian.Uint64(sum[8:])
+		high = binary.BigEndian.Uint64(sum[:8])
+	)
+	return ID{Low: (high ^ low) % g.max}
 }
 
 type gen64 struct{ p sync.Pool }
@@ -91,8 +114,12 @@ func (g *gen64) Get(s string) ID {
 	h.Reset()
 	fmt.Fprint(h, s)
 
-	sum := binary.BigEndian.Uint64(h.Sum(nil))
-	return ID{Low: sum}
+	sum := h.Sum(nil)
+	var (
+		low  = binary.BigEndian.Uint64(sum[8:])
+		high = binary.BigEndian.Uint64(sum[:8])
+	)
+	return ID{Low: high ^ low}
 }
 
 type gen128 struct{ p sync.Pool }
@@ -105,8 +132,9 @@ func (g *gen128) Get(s string) ID {
 	fmt.Fprint(h, s)
 
 	sum := h.Sum(nil)
-	return ID{
-		Low:  binary.BigEndian.Uint64(sum[8:]),
-		High: binary.BigEndian.Uint64(sum[:8]),
-	}
+	var (
+		low  = binary.BigEndian.Uint64(sum[8:])
+		high = binary.BigEndian.Uint64(sum[:8])
+	)
+	return ID{High: high, Low: low}
 }
