@@ -10,14 +10,21 @@ import (
 type DescriptorSet struct {
 	// Descriptors is the inner set of descriptors.
 	Descriptors []Descriptor
+
 	// Size is the maximum size of the set. Operations against the DescriptorSet
 	// will keep it bound to this.
 	Size int
+
 	// KeepBiggest will keep the biggest elements when doing an Insert.
 	// If the set is IDs (0, 1, 2), size=3, then an insert of 5
 	// with KeepBiggest=true will change the set to (1, 2, 5), while
 	// KeepBiggest=false will keep at (0, 1, 2).
+	//
+	// KeepBiggest being true corresponds to the set of predecessors.
 	KeepBiggest bool
+
+	// SearchFunc should return true when i is >= j.
+	SearchFunc func(i, j Descriptor) bool
 }
 
 // Clone returns a copy of DescriptorSet.
@@ -26,6 +33,7 @@ func (dset *DescriptorSet) Clone() *DescriptorSet {
 	clone.Descriptors = make([]Descriptor, len(dset.Descriptors))
 	clone.Size = dset.Size
 	clone.KeepBiggest = dset.KeepBiggest
+	clone.SearchFunc = dset.SearchFunc
 
 	for i := 0; i < len(dset.Descriptors); i++ {
 		clone.Descriptors[i] = dset.Descriptors[i]
@@ -52,9 +60,42 @@ func (dset *DescriptorSet) Remove(d Descriptor) bool {
 }
 
 func (dset *DescriptorSet) indexOf(d Descriptor) int {
+	sf := dset.SearchFunc
+	if sf == nil {
+		sf = DefaultSearchFunc
+	}
+
 	return sort.Search(len(dset.Descriptors), func(i int) bool {
-		return id.Compare(dset.Descriptors[i].ID, d.ID) >= 0
+		return sf(dset.Descriptors[i], d)
 	})
+}
+
+// DefaultSearchFunc returns true when i >= j.
+func DefaultSearchFunc(i, j Descriptor) bool {
+	return id.Compare(i.ID, j.ID) >= 0
+}
+
+// WraparoundSearchFunc sorts IDs in two tiers: IDs that are larger than wraparound
+// and IDs that are smaller than wraparound. This allows for wraparound semantics
+// in the ring.
+//
+// Example: Given a set (0, 100, 200, 300) and wrapping around 150, numbers
+// will be sorted as (200, 300, 0, 100).
+func WraparoundSearchFunc(wraparound id.ID) func(i, j Descriptor) bool {
+	return func(i, j Descriptor) bool {
+		var (
+			iBigger = id.Compare(i.ID, wraparound) >= 0
+			jBigger = id.Compare(j.ID, wraparound) >= 0
+		)
+		switch {
+		// Compare normally if neither or both are bigger than wraparound.
+		case (!iBigger && !jBigger) || (iBigger && jBigger):
+			return id.Compare(i.ID, j.ID) >= 0
+		// Otherwise, i >= j iff i is bigger than the wraparound.
+		default:
+			return !iBigger
+		}
+	}
 }
 
 // Push pushes d into dset. If d already exists in dset or dset is full, Push

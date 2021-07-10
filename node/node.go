@@ -1,12 +1,5 @@
 package node
 
-// TODO(rfratto): Known issues:
-//
-// 1. The hash ring isn't really a "ring" and doesn't loop around. While
-//    messages will still always find their way to the correct node, it will
-//    take a few extra hops, and replication can't be implemented until the
-//    ring is actually a ring.
-
 import (
 	"context"
 	"errors"

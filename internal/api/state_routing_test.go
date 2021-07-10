@@ -183,42 +183,91 @@ func TestSimulateCluster(t *testing.T) {
 
 	var (
 		numNodes = 10_000
-		numKeys  = 1_000_000
 	)
 
 	nodes, states := createTestCluster(t, rnd, numNodes)
 
-	// Test routing keys and ensure that their final destination is the correct node.
-	for i := 0; i < numKeys; i++ {
-		key := id.ID{Low: uint64(rnd.Uint32())}
+	// Assert that the set of leaves of each node is correct.
+	t.Run("leaves", func(t *testing.T) {
+		for i, n := range nodes {
+			for p := len(n.Predecessors.Descriptors) - 1; p >= 0; p-- {
+				actual := n.Predecessors.Descriptors[p]
 
-		// Pick a random node to start the request from
-		seed := nodes[rnd.Intn(len(nodes))]
-		dest := fakeRoute(t, seed, key, states)
+				// Wraparound
+				expectIdx := i - (len(n.Predecessors.Descriptors) - p)
+				if expectIdx < 0 {
+					expectIdx = len(nodes) - (-expectIdx)
+				}
+				expect := nodes[expectIdx].Node
 
-		// Find the ~10 nodes closest to our key to make sure none of them are
-		// closer. This lets us do a ton of lookups very quickly even though
-		// it looks funky.
-		closest := sort.Search(len(nodes), func(i int) bool {
-			return id.Compare(nodes[i].Node.ID, key) >= 0
-		})
-		start := closest - 5
-		end := closest + 5
-		if start < 0 {
-			start = 0
-		}
-		if end >= len(nodes) {
-			end = len(nodes) - 1
-		}
+				require.Equal(t, expect, actual,
+					"node %s (index=%d) has wrong predecessors. expected predecessor %d to be %s, founud %s",
+					n.Node.ID.Digits(32, 8),
+					i,
+					p,
+					expect.ID.Digits(32, 8),
+					actual.ID.Digits(32, 8),
+				)
+			}
 
-		dist := idDistance(dest.ID, key)
-		for _, s := range nodes[start:end] {
-			altDist := idDistance(s.Node.ID, key)
-			if id.Compare(altDist, dist) < 0 {
-				require.Fail(t, "found routing to wrong node")
+			for s := 0; s < len(n.Successors.Descriptors); s++ {
+				actual := n.Successors.Descriptors[s]
+
+				// Wraparound
+				expectIdx := i + s + 1
+				if expectIdx >= len(nodes) {
+					expectIdx = expectIdx - len(nodes)
+				}
+				expect := nodes[expectIdx].Node
+
+				require.Equal(t, expect, actual,
+					"node %s (index=%d) has wrong successors. expected successor %d to be %s, found %s",
+					n.Node.ID.Digits(32, 8),
+					i,
+					s,
+					expect.ID.Digits(32, 8),
+					actual.ID.Digits(32, 8),
+				)
 			}
 		}
-	}
+	})
+
+	// Test routing keys and ensure that their final destination is the correct node.
+	t.Run("routing", func(t *testing.T) {
+		var numKeys = 1_000_000
+
+		for i := 0; i < numKeys; i++ {
+			key := id.ID{Low: uint64(rnd.Uint32())}
+
+			// Pick a random node to start the request from
+			seed := nodes[rnd.Intn(len(nodes))]
+			dest := fakeRoute(t, seed, key, states)
+
+			// Find the ~10 nodes closest to our key to make sure none of them are
+			// closer. This lets us do a ton of lookups very quickly even though
+			// it looks funky.
+			closest := sort.Search(len(nodes), func(i int) bool {
+				return id.Compare(nodes[i].Node.ID, key) >= 0
+			})
+			start := closest - 5
+			end := closest + 5
+			if start < 0 {
+				start = 0
+			}
+			if end >= len(nodes) {
+				end = len(nodes) - 1
+			}
+
+			dist := idDistance(dest.ID, key, id.MaxForSize(32))
+			for _, s := range nodes[start:end] {
+				altDist := idDistance(s.Node.ID, key, id.MaxForSize(32))
+				if id.Compare(altDist, dist) < 0 {
+					require.Fail(t, "found routing to wrong node", "got distance %s but found closer distance %s", dist, altDist)
+				}
+			}
+		}
+	})
+
 }
 
 // TestSimulateCluster_Distribution tests the load distribution based on
@@ -307,8 +356,18 @@ func fakeRoute(t *testing.T, seed *State, key id.ID, states map[id.ID]*State) De
 	next := seed
 	dest := seed.Node
 
+	hops := []Descriptor{}
+
 	for next != nil {
 		cur := next
+
+		for _, h := range hops {
+			if h == cur.Node {
+				require.Failf(t, "detected routing cycle", "cycle to %s", h.ID)
+			}
+		}
+		hops = append(hops, cur.Node)
+
 		nextDesc, ok := NextHop(cur, key)
 		require.True(t, ok, "routing error")
 
@@ -319,6 +378,7 @@ func fakeRoute(t *testing.T, seed *State, key id.ID, states map[id.ID]*State) De
 		} else {
 			next = states[nextDesc.ID]
 		}
+
 	}
 
 	return dest
@@ -339,9 +399,6 @@ func createTestCluster(t *testing.T, rnd *rand.Rand, size int) ([]*State, map[id
 		for exist {
 			nodeID = id.ID{Low: uint64(rnd.Uint32())}
 			_, exist = states[nodeID]
-			if exist {
-				panic("uh oh")
-			}
 		}
 
 		s := NewState(Descriptor{ID: nodeID, Addr: "test"}, 8, 8, 32, 8)

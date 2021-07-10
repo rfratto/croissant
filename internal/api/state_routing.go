@@ -1,8 +1,6 @@
 package api
 
 import (
-	"math/bits"
-
 	"github.com/rfratto/croissant/id"
 )
 
@@ -28,7 +26,7 @@ func NextHop(s *State, key id.ID) (next Descriptor, ok bool) {
 		// Send to the lowest leaf node. Seed with ourselves so the local node can
 		// be a candidate.
 		var (
-			lowestDist = idDistance(s.Node.ID, key)
+			lowestDist = s.distance(s.Node.ID, key)
 			lowestPeer = s.Node
 		)
 
@@ -39,7 +37,7 @@ func NextHop(s *State, key id.ID) (next Descriptor, ok bool) {
 				continue
 			}
 
-			dist := idDistance(n.ID, key)
+			dist := s.distance(n.ID, key)
 			if id.Compare(dist, lowestDist) < 0 {
 				lowestDist = dist
 				lowestPeer = n
@@ -64,7 +62,7 @@ func NextHop(s *State, key id.ID) (next Descriptor, ok bool) {
 	// Rare case: look for any node at all with a shared prefix greater than ours
 	// that is also closer to it in the keyspace.
 	var (
-		localDistance  = idDistance(s.Node.ID, key)
+		localDistance  = s.distance(s.Node.ID, key)
 		lowestDistance = localDistance
 	)
 
@@ -78,7 +76,7 @@ func NextHop(s *State, key id.ID) (next Descriptor, ok bool) {
 			continue
 		}
 
-		dist := idDistance(p.ID, key)
+		dist := s.distance(p.ID, key)
 		if id.Compare(dist, lowestDistance) < 0 {
 			lowestDistance = dist
 			next = p
@@ -90,40 +88,46 @@ func NextHop(s *State, key id.ID) (next Descriptor, ok bool) {
 }
 
 // inLeafRange returns true if the key is in the range of the leaf nodes.
-// If the leaf set isn't full, returns true, since a non-full leaf set
-// means the entire range of keys falls within the known leaf nodes.
 func inLeafRange(s *State, key id.ID) bool {
+	// If we're not full then the leaves contain all nodes in the cluster.
 	if !s.Predecessors.IsFull() || !s.Successors.IsFull() {
 		return true
 	}
 
-	var (
-		lowest  = s.Predecessors.Descriptors[0]
-		highest = s.Successors.Descriptors[len(s.Successors.Descriptors)-1]
-	)
+	// Get a set of descriptors that includes predecessors, ourselves, and
+	// successors. Because of wraparound, this set might not be sorted and
+	// nodes may appear twice.
+	set := make([]Descriptor, 0, len(s.Predecessors.Descriptors)+len(s.Successors.Descriptors)+1)
+	set = append(set, s.Predecessors.Descriptors...)
+	set = append(set, s.Node)
+	set = append(set, s.Successors.Descriptors...)
 
-	// lowest <= key <= highest
-	return id.Compare(lowest.ID, key) <= 0 && id.Compare(key, highest.ID) <= 0
-}
+	// Break up each descriptors into pairs and see if key falls in between them.
+	for i := 0; i < len(set); i++ {
+		if i+1 >= len(set) {
+			break
+		}
 
-// idDistance calculates |a - b|.
-func idDistance(a, b id.ID) id.ID {
-	cmp := id.Compare(a, b)
-	switch {
-	case cmp < 0: // a < b
-		return idSub(b, a)
-	case cmp == 0: // a == b
-		return id.Zero
-	case cmp > 0: // a > b
-		return idSub(a, b)
-	default:
-		panic("impossible case")
+		var (
+			from = set[i+0].ID
+			to   = set[i+1].ID
+		)
+
+		var inRange bool
+
+		// If from > to then there's wraparound in the ring.
+		if id.Compare(from, to) > 0 {
+			// from <= key || key <= to
+			inRange = (id.Compare(from, key) <= 0) || (id.Compare(key, to) <= 0)
+		} else {
+			// from <= key && key <= to
+			inRange = id.Compare(from, key) <= 0 && id.Compare(key, to) <= 0
+		}
+
+		if inRange {
+			return true
+		}
 	}
-}
 
-// sub :: v - o
-func idSub(v, o id.ID) id.ID {
-	low, borrow := bits.Sub64(v.Low, o.Low, 0)
-	high, borrow := bits.Sub64(v.High, o.High, borrow)
-	return id.ID{High: high, Low: low}
+	return false
 }

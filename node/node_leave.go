@@ -34,6 +34,7 @@ func (c *controller) HealthChanged(d api.Descriptor, h api.Health) {
 
 	// Stop tracking the health of the node after we're done replacing it.
 	// If we don't do this, dead nodes will leak in the state table.
+	defer level.Info(c.log).Log("msg", "done replacing dead peer", "peer", d.Addr)
 	defer c.state.Untrack(d)
 	defer c.pool.Remove(d.Addr)
 
@@ -43,8 +44,9 @@ func (c *controller) HealthChanged(d api.Descriptor, h api.Health) {
 
 	// Determine what roles the dead node fills.
 	var (
-		isLeaf     bool = saved.IsLeaf(d)
-		isNeighbor bool = saved.Neighbors.Contains(d)
+		isPredecessor      = saved.Predecessors.Contains(d)
+		isSuccessor        = saved.Successors.Contains(d)
+		isNeighbor    bool = saved.Neighbors.Contains(d)
 	)
 
 	// Determine if it's in the routing table
@@ -56,31 +58,50 @@ func (c *controller) HealthChanged(d api.Descriptor, h api.Health) {
 		routingCol = -1
 	}
 
-	if isLeaf {
-		leaves := saved.Leaves(false)
-
-		// Predecessors should be replaced by contacting the
-		// smallest live predecessor, since it's the most likely to have a
-		// replacement. If it's a successor, we need to do the opposite,
-		// so invert the array.
-		if saved.Successors.Contains(d) {
-			leaves = api.ReverseDescriptors(leaves)
-		}
-
-		for _, l := range leaves {
-			state, err := getPeerState(ctx, c.pool, l.Addr)
+	if isPredecessor {
+		// Predecessors should be replaced by contacting the smallest live
+		// predecessor since it's the most likely to have a replacement node for
+		// us.
+		for _, pred := range saved.Predecessors.Descriptors {
+			if saved.Statuses[pred] != api.Healthy {
+				continue
+			}
+			state, err := getPeerState(ctx, c.pool, pred.Addr)
 			if err != nil {
 				level.Warn(c.log).Log("msg", "could not get state from peer candidate", "err", err)
-				c.health.SetHealth(l, api.Unhealthy)
+				c.health.SetHealth(pred, api.Unhealthy)
 				continue
 			}
 
-			c.state.ReplaceLeaf(d, state)
+			c.state.ReplacePredecessor(d, state)
 			break
 		}
 
 		// Forcibly remove the entry in case there weren't any candiates to check from.
-		c.state.ReplaceLeaf(d, nil)
+		c.state.ReplacePredecessor(d, nil)
+	}
+
+	if isSuccessor {
+		// Successors should be replaced by contacting the largest live successor
+		// since it's the most likely to have a replacement node for us.
+		for i := len(saved.Successors.Descriptors) - 1; i >= 0; i-- {
+			succ := saved.Successors.Descriptors[i]
+			if saved.Statuses[succ] != api.Healthy {
+				continue
+			}
+			state, err := getPeerState(ctx, c.pool, succ.Addr)
+			if err != nil {
+				level.Warn(c.log).Log("msg", "could not get state from peer candidate", "err", err)
+				c.health.SetHealth(succ, api.Unhealthy)
+				continue
+			}
+
+			c.state.ReplaceSuccessor(d, state)
+			break
+		}
+
+		// Forcibly remove the entry in case there weren't any candiates to check from.
+		c.state.ReplaceSuccessor(d, nil)
 	}
 
 	// When a routing node fails, get the state from live nodes from the same
@@ -140,7 +161,7 @@ func (c *controller) HealthChanged(d api.Descriptor, h api.Health) {
 	}
 
 	// After updating the state, refresh health checker jobs.
-	if isLeaf {
+	if isPredecessor || isSuccessor {
 		c.app.PeersChanged(getPeers(c.state))
 	}
 	c.health.CheckNodes(c.state.Peers(true))

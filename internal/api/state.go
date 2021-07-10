@@ -56,8 +56,19 @@ func NewState(
 
 		// Predecessors <= Node <= Successors, which means we should keep
 		// the biggest numbers closest to Node for the Predecessors.
-		Predecessors: &DescriptorSet{Size: numLeaves / 2, KeepBiggest: true},
-		Successors:   &DescriptorSet{Size: numLeaves / 2, KeepBiggest: false},
+		//
+		// We will also keep track of nodes that wrap around the ring, so
+		// a node may appear as both a predecessor and a successor.
+		Predecessors: &DescriptorSet{
+			Size:        numLeaves / 2,
+			KeepBiggest: true,
+			SearchFunc:  WraparoundSearchFunc(node.ID),
+		},
+		Successors: &DescriptorSet{
+			Size:        numLeaves / 2,
+			KeepBiggest: false,
+			SearchFunc:  WraparoundSearchFunc(node.ID),
+		},
 
 		Size: size,
 		Base: base,
@@ -176,8 +187,8 @@ func (s *State) Clone() *State {
 	return &clone
 }
 
-// Leaves returns the full set of leaves. If all is true, known unhealthy
-// leaves will also be returned.
+// Leaves returns the full set of unique leaves. If all is true, known
+// unhealthy leaves will also be returned.
 func (s *State) Leaves(all bool) []Descriptor {
 	s.mut.Lock()
 	defer s.mut.Unlock()
@@ -185,17 +196,30 @@ func (s *State) Leaves(all bool) []Descriptor {
 }
 
 func (s *State) leaves(all bool) []Descriptor {
+	added := map[Descriptor]struct{}{}
+
 	leaves := make([]Descriptor, 0, len(s.Predecessors.Descriptors)+len(s.Successors.Descriptors))
 	for _, p := range s.Predecessors.Descriptors {
+		if _, exist := added[p]; exist {
+			continue
+		}
+
 		if all || s.Statuses[p] == Healthy {
 			leaves = append(leaves, p)
+			added[p] = struct{}{}
 		}
 	}
 	for _, p := range s.Successors.Descriptors {
+		if _, exist := added[p]; exist {
+			continue
+		}
+
 		if all || s.Statuses[p] == Healthy {
 			leaves = append(leaves, p)
+			added[p] = struct{}{}
 		}
 	}
+
 	return leaves
 }
 
@@ -335,61 +359,8 @@ func (s *State) IsLeaf(d Descriptor) bool {
 	return s.Predecessors.Contains(d) || s.Successors.Contains(d)
 }
 
-// ReplaceLeaf will replace d with a leaf from peer.
-// d must exist as a leaf and be unhealthy, otherwise
-// nothing happens.
-func (s *State) ReplaceLeaf(d Descriptor, peer *State) (changed bool) {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-
-	isPredecessor := s.Predecessors.Contains(d)
-	isSuccessor := s.Successors.Contains(d)
-
-	if s.Statuses[d] == Healthy || (!isPredecessor && !isSuccessor) {
-		return false
-	}
-
-	s.Predecessors.Remove(d)
-	s.Successors.Remove(d)
-	s.LastUpdated = time.Now().UTC()
-	changed = true // Changed is always true because we at least removed the leaf
-
-	if peer == nil {
-		return
-	}
-
-NextLeaf:
-	for _, l := range peer.Leaves(false) {
-		if s.Statuses[l] != Healthy {
-			continue
-		}
-
-		switch {
-		case isPredecessor:
-			// Only replace predecessor with another predecessor
-			if id.Compare(l.ID, s.Node.ID) >= 0 {
-				continue NextLeaf
-			}
-			if s.Predecessors.Insert(l) {
-				return
-			}
-		case isSuccessor:
-			// Only replace successor with another successor
-			if id.Compare(l.ID, s.Node.ID) <= 0 {
-				continue NextLeaf
-			}
-			if s.Successors.Insert(l) {
-				return
-			}
-		}
-	}
-
-	return
-}
-
-// ReplacePredecessor will replace d with a leaf from peer.
-// d must exist as a Predecessor and be unhealthy, otherwise
-// nothing happens.
+// ReplacePredecessor will replace d with a healthy leaf from peer.
+// d must exist as a Predecessor and be unhealthy.
 func (s *State) ReplacePredecessor(d Descriptor, peer *State) (changed bool) {
 	s.mut.Lock()
 	defer s.mut.Unlock()
@@ -398,31 +369,30 @@ func (s *State) ReplacePredecessor(d Descriptor, peer *State) (changed bool) {
 		return false
 	}
 
-	s.Predecessors.Remove(d)
+	changed = s.Predecessors.Remove(d)
 	s.LastUpdated = time.Now().UTC()
 
 	if peer == nil {
-		return true
+		return
 	}
 
-	// Only replace with a value < s.Node
 	for _, l := range peer.Leaves(false) {
-		if s.Statuses[l] != Healthy {
-			continue
-		}
-		if id.Compare(l.ID, s.Node.ID) >= 0 { // l.ID >= s.Node.ID
+		// Only replace with a healthy node that's also not us.
+		if s.Statuses[l] != Healthy || l == s.Node {
 			continue
 		}
 		if s.Predecessors.Insert(l) {
-			return true
+			// TODO(rfratto): optimization: ensure s.Predecessors.Insert will only return true
+			// when the set changes and not if l already exsts. Then do an early return here.
+			changed = true
 		}
 	}
-	return true
+
+	return
 }
 
-// ReplaceSuccessor will replace d with a leaf from peer.
-// d must exist as a Successors and be unhealthy, otherwise
-// nothing happens.
+// ReplaceSuccessor will replace d with a healthy leaf from peer.
+// d must exist as a Successors and be unhealthy.
 func (s *State) ReplaceSuccessor(d Descriptor, peer *State) (changed bool) {
 	s.mut.Lock()
 	defer s.mut.Unlock()
@@ -431,26 +401,26 @@ func (s *State) ReplaceSuccessor(d Descriptor, peer *State) (changed bool) {
 		return false
 	}
 
-	s.Successors.Remove(d)
+	changed = s.Successors.Remove(d)
 	s.LastUpdated = time.Now().UTC()
 
 	if peer == nil {
-		return true
+		return
 	}
 
-	// Only replace with a value > s.Node
 	for _, l := range peer.Leaves(false) {
-		if s.Statuses[l] != Healthy {
-			continue
-		}
-		if id.Compare(l.ID, s.Node.ID) <= 0 { // l.ID <= s.Node.ID
+		// Only replace with a healthy node that's also not us.
+		if s.Statuses[l] != Healthy || l == s.Node {
 			continue
 		}
 		if s.Successors.Insert(l) {
-			return true
+			// TODO(rfratto): optimization: ensure s.Predecessors.Insert will only return true
+			// when the set changes and not if l already exsts. Then do an early return here.
+			changed = true
 		}
 	}
-	return true
+
+	return
 }
 
 // ReplaceRoute will replace d in the routing table with an entry from peer.
@@ -510,9 +480,8 @@ func (s *State) routeIndex(d Descriptor) (row, col int) {
 	return
 }
 
-// ReplaceNeighbor will replace d with a neighbor from peer.
-// d must exist as a neighbor and be unhealthy, otherwise returns
-// ok==false.
+// ReplaceNeighbor will replace d with a healthy neighbor from peer.
+// d must exist as a neighbor and be unhealthy.
 func (s *State) ReplaceNeighbor(d Descriptor, peer *State) (changed, ok bool) {
 	s.mut.Lock()
 	defer s.mut.Unlock()
@@ -530,7 +499,7 @@ func (s *State) ReplaceNeighbor(d Descriptor, peer *State) (changed, ok bool) {
 	}
 
 	for _, n := range peer.Neighbors.Descriptors {
-		if peer.Statuses[n] != Healthy || s.Statuses[n] != Healthy {
+		if peer.Statuses[n] != Healthy || s.Statuses[n] != Healthy || n == s.Node {
 			continue
 		}
 		if s.addNeighbor(n) {
@@ -582,11 +551,11 @@ func (s *State) addLeaf(d Descriptor) (updated bool) {
 		}
 	}()
 
-	switch id.Compare(d.ID, s.Node.ID) {
-	case -1: // d.ID < s.Node.ID
-		updated = s.Predecessors.Insert(d)
-	case 1: // d.ID > s.Node.ID
-		updated = s.Successors.Insert(d)
+	if s.Predecessors.Insert(d) {
+		updated = true
+	}
+	if s.Successors.Insert(d) {
+		updated = true
 	}
 
 	return
@@ -631,6 +600,11 @@ func (s *State) Untrack(p Descriptor) (changed bool) {
 	_, ok := s.Statuses[p]
 	delete(s.Statuses, p)
 	return ok
+}
+
+// distance calculates the distance of a and b.
+func (s *State) distance(a, b id.ID) id.ID {
+	return idDistance(a, b, id.MaxForSize(s.Size))
 }
 
 // Prefix returns the first index where a and b differ. Returns
